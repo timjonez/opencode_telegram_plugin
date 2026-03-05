@@ -1,8 +1,19 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import TelegramBot from "node-telegram-bot-api"
+import * as fs from "fs"
+import * as path from "path"
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID
+
+// Setup logging to file
+const LOG_FILE = path.join(process.env.HOME || "/tmp", ".opencode-telegram-remote.log")
+function log(...args: any[]) {
+  const timestamp = new Date().toISOString()
+  const message = args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ")
+  const line = `[${timestamp}] [telegram-remote] ${message}\n`
+  fs.appendFileSync(LOG_FILE, line)
+}
 
 interface PendingPermission {
   permissionId: string
@@ -20,12 +31,16 @@ export const TelegramRemotePlugin: Plugin = async ({
   $,
   directory,
 }) => {
+  log("=".repeat(80))
+  log(`[telegram-remote] Plugin loading... Log file: ${LOG_FILE}`)
+  log(`[telegram-remote] Directory: ${directory}`)
+  
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-    console.warn(
-      "[telegram-remote] Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID. Plugin disabled.",
-    )
+    log("[telegram-remote] Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID. Plugin disabled.")
     return {}
   }
+  
+  log("[telegram-remote] Plugin enabled with valid config")
 
   const chatId = TELEGRAM_CHAT_ID
 
@@ -34,6 +49,7 @@ export const TelegramRemotePlugin: Plugin = async ({
   let currentSessionId: string | null = null
   const pendingPermissions = new Map<number, PendingPermission>()
   let isProcessing = false
+  let awaitingPromptResult = false  // true when we've fired promptAsync and are waiting for idle
   let openCodeCommands: OpenCodeCommand[] = []
   let eventStreamAbort: AbortController | null = null
 
@@ -57,7 +73,7 @@ export const TelegramRemotePlugin: Plugin = async ({
           options,
         )
       } catch (err) {
-        console.error("[telegram-remote] Failed to send message:", err)
+        log("ERROR:", "[telegram-remote] Failed to send message:", err)
       }
     }
   }
@@ -105,15 +121,20 @@ export const TelegramRemotePlugin: Plugin = async ({
         const session = await client.session.get({
           path: { id: currentSessionId },
         })
-        if (session.data) return currentSessionId
+        if (session.data) {
+          log(`[telegram-remote] Using existing session: ${currentSessionId}`)
+          return currentSessionId
+        }
       } catch {
         // Session gone, create new one
+        log(`[telegram-remote] Session ${currentSessionId} not found, creating new one`)
       }
     }
     const session = await client.session.create({
       body: { title: "Telegram Remote" },
     })
     currentSessionId = session.data!.id
+    log(`[telegram-remote] Created new session: ${currentSessionId}`)
     return currentSessionId
   }
 
@@ -132,7 +153,7 @@ export const TelegramRemotePlugin: Plugin = async ({
         }))
       }
     } catch (err) {
-      console.error("[telegram-remote] Failed to fetch commands:", err)
+      log("ERROR:", "[telegram-remote] Failed to fetch commands:", err)
     }
     return []
   }
@@ -156,60 +177,83 @@ export const TelegramRemotePlugin: Plugin = async ({
     }
   }
 
+  // ---------- Handle session idle (prompt completed) ----------
+
+  async function handleSessionIdle(sessionId: string) {
+    if (!awaitingPromptResult) return
+    if (sessionId !== currentSessionId) return
+
+    awaitingPromptResult = false
+    isProcessing = false
+    log(`[telegram-remote] Session idle, fetching last assistant message`)
+
+    try {
+      const result = await client.session.messages({ path: { id: sessionId } })
+      const messages = (result.data as any[]) || []
+      // Find the last assistant message
+      const lastAssistant = [...messages].reverse().find(
+        (m: any) => m.info?.role === "assistant"
+      )
+      if (lastAssistant) {
+        const responseText = extractResponseText(lastAssistant)
+        if (responseText) {
+          for (const chunk of splitMessage(responseText, 3500)) await send(chunk)
+          return
+        }
+      }
+      await send("Task completed.")
+    } catch (err: any) {
+      log(`[telegram-remote] Error fetching messages after idle: ${err?.message || err}`)
+      await send("Task completed (could not fetch response).")
+    }
+  }
+
   // ---------- Respond to permission via SDK ----------
 
   async function respondToPermission(
     sessionId: string,
     permissionId: string,
-    approved: boolean,
+    reply: "once" | "always" | "reject",
   ) {
-    const response = approved ? "allow" : "deny"
+    const label =
+      reply === "once" ? "Approved (once)" :
+      reply === "always" ? "Approved (always)" :
+      "Denied"
+
+    // Call the SDK method directly on the client to preserve `this` binding.
+    // The method is postSessionIdPermissionsPermissionId on the OpencodeClient class.
+    // Extracting it into a variable loses `this._client` context.
     try {
-      // Try the SDK method first (top-level client method per SDK docs)
-      const sdkMethod = (client as any).postSessionByIdPermissionsByPermissionId
-      if (typeof sdkMethod === "function") {
-        await sdkMethod({
-          path: { id: sessionId, permissionId },
-          body: { response },
-        })
-        return
-      }
-
-      // Try alternate SDK paths
-      const sessionMethod = (client.session as any)
-        .postSessionByIdPermissionsByPermissionId
-      if (typeof sessionMethod === "function") {
-        await sessionMethod({
-          path: { id: sessionId, permissionId },
-          body: { response },
-        })
-        return
-      }
-
-      // Fallback to direct HTTP - try both URL patterns
-      const urls = [
-        `http://127.0.0.1:4096/session/${sessionId}/permissions/${permissionId}`,
-        `http://127.0.0.1:4096/session/${sessionId}/permission/${permissionId}`,
-      ]
-      let lastErr: any
-      for (const url of urls) {
-        try {
-          const res = await fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ response }),
-          })
-          if (res.ok) return
-          lastErr = `HTTP ${res.status}: ${await res.text()}`
-        } catch (e) {
-          lastErr = e
-        }
-      }
-      throw lastErr
-    } catch (err) {
-      console.error("[telegram-remote] Error responding to permission:", err)
-      await send(`Failed to send permission response: ${err}`)
+      await (client as any).postSessionIdPermissionsPermissionId({
+        path: { id: sessionId, permissionID: permissionId },
+        body: { response: reply },
+      })
+      log(`[telegram-remote] Permission responded via SDK: ${reply}`)
+      await send(`✅ ${label}`)
+      return
+    } catch (e: any) {
+      log(`[telegram-remote] SDK permission response failed: ${e?.message || e}`)
     }
+
+    // Fallback: try v2 permission.reply() if SDK is upgraded in the future
+    try {
+      const permClient = (client as any).permission
+      if (permClient?.reply && typeof permClient.reply === "function") {
+        await permClient.reply({ requestID: permissionId, reply })
+        log(`[telegram-remote] Permission responded via permission.reply(): ${reply}`)
+        await send(`✅ ${label}`)
+        return
+      }
+    } catch (e: any) {
+      log(`[telegram-remote] permission.reply() failed: ${e?.message || e}`)
+    }
+
+    // All methods failed
+    log("[telegram-remote] All permission response methods failed")
+    await send(
+      `⚠️ Could not respond to permission automatically.\n` +
+      `Please respond in the OpenCode TUI directly.`
+    )
   }
 
   // ================================================================
@@ -219,41 +263,27 @@ export const TelegramRemotePlugin: Plugin = async ({
   // ---------- Handle permission event from any source ----------
 
   async function handlePermissionAsked(props: any) {
-    const sessionId =
-      props.sessionID || props.session_id || props.sessionId
+    const sessionId = props.sessionID || props.session_id || props.sessionId
     if (!sessionId || sessionId !== currentSessionId) return
 
-    const tool = props.tool || "unknown"
-    const permissionId =
-      props.permissionID || props.permission_id || props.permissionId || props.id
-    if (!permissionId) {
-      console.error("[telegram-remote] Permission event missing permissionId:", props)
-      return
-    }
+    const tool = props.permission || "unknown"
+    const permissionId = props.id || props.permissionID || props.permission_id || props.permissionId
+    if (!permissionId) return
 
-    const args = props.args
-      ? JSON.stringify(props.args, null, 2).slice(0, 400)
-      : props.input
-        ? JSON.stringify(props.input, null, 2).slice(0, 400)
-        : ""
+    const args = props.patterns
+      ? props.patterns.join("\n").slice(0, 400)
+      : ""
 
     // Telegram callback_data has a 64 byte limit, so truncate the
     // permissionId if needed (we look up by it in pendingPermissions)
     const shortId = permissionId.slice(0, 48)
+    
+    // Send text-based permission request
     const sentMsg = await send(
-      `*Permission Request*\n\nTool: \`${escMd(tool)}\`\n` +
-        (args ? `\`\`\`\n${args}\n\`\`\`\n\n` : "\n") +
-        `Approve or Deny?`,
-      {
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: "Approve", callback_data: `pa_${shortId}` },
-              { text: "Deny", callback_data: `pd_${shortId}` },
-            ],
-          ],
-        },
-      },
+      `*🔐 Permission Request*\n\n` +
+      `Tool: \`${escMd(tool)}\`\n` +
+      `Command: \`${escMd(args || "N/A")}\`\n\n` +
+      `Reply *YES* to approve once, *ALWAYS* to always allow, or *NO* to deny:`
     )
 
     if (sentMsg && permissionId) {
@@ -267,8 +297,7 @@ export const TelegramRemotePlugin: Plugin = async ({
       setTimeout(async () => {
         if (pendingPermissions.has(sentMsg.message_id)) {
           pendingPermissions.delete(sentMsg.message_id)
-          await respondToPermission(sessionId, permissionId, false)
-          await send("Permission timed out (5 min). Auto-denied.")
+          await send("⏰ Permission timed out (5 min).")
         }
       }, 5 * 60 * 1000)
     }
@@ -277,51 +306,71 @@ export const TelegramRemotePlugin: Plugin = async ({
   // ---------- SSE event stream for real-time events ----------
 
   async function startEventStream() {
+    log("[telegram-remote] Starting SSE event stream...")
     try {
       eventStreamAbort = new AbortController()
+      log("[telegram-remote] Subscribing to events...")
       const events = await client.event.subscribe()
+      log("[telegram-remote] Event subscription result:", events)
       if (!events.stream) {
-        console.error("[telegram-remote] No event stream available")
+        log("ERROR:", "[telegram-remote] No event stream available")
         return
       }
 
+      log("[telegram-remote] Event stream connected, waiting for events...")
       ;(async () => {
         try {
           for await (const event of events.stream as any) {
+            log(`[telegram-remote] SSE EVENT RECEIVED: type=${event.type}`, JSON.stringify(event, null, 2))
             try {
               if (event.type === "permission.asked") {
+                log("[telegram-remote] Permission event detected, calling handler...")
                 await handlePermissionAsked(event.properties || event)
+              }
+              if (event.type === "session.idle") {
+                const props = event.properties || event
+                const sessionId =
+                  props.sessionID || props.session_id || props.sessionId
+                if (sessionId) {
+                  log(`[telegram-remote] SSE session.idle for ${sessionId}`)
+                  await handleSessionIdle(sessionId)
+                }
               }
               if (event.type === "session.error") {
                 const props = event.properties || event
                 const sessionId =
                   props.sessionID || props.session_id || props.sessionId
                 if (sessionId === currentSessionId) {
+                  if (awaitingPromptResult) {
+                    awaitingPromptResult = false
+                    isProcessing = false
+                  }
                   await send(
                     `*Session Error:*\n${truncate(String(props.error || "Unknown error"), 1000)}`,
                   )
                 }
               }
             } catch (err) {
-              console.error("[telegram-remote] Error processing event:", err)
+              log("ERROR:", "[telegram-remote] Error processing event:", err)
             }
           }
         } catch (err: any) {
           if (err?.name !== "AbortError") {
-            console.error("[telegram-remote] Event stream ended:", err)
+            log("ERROR:", "[telegram-remote] Event stream ended:", err)
             // Reconnect after a delay
             setTimeout(() => startEventStream(), 3000)
           }
         }
       })()
     } catch (err) {
-      console.error("[telegram-remote] Failed to start event stream:", err)
+      log("ERROR:", "[telegram-remote] Failed to start event stream:", err)
       // Retry after delay
       setTimeout(() => startEventStream(), 5000)
     }
   }
 
   async function initBot() {
+    log("[telegram-remote] Initializing bot...")
     try {
       // First, kill any stale polling sessions by calling deleteWebhook
       // and consuming pending updates. This prevents the 409 Conflict error.
@@ -337,17 +386,18 @@ export const TelegramRemotePlugin: Plugin = async ({
           params: { timeout: 30 },
         },
       })
+      log("[telegram-remote] Bot created successfully")
 
       // Catch polling errors so they don't crash the process
       bot.on("polling_error", (err) => {
         // 409 = another instance was running, we already handled it above
         // but log others
         if (!err.message?.includes("409")) {
-          console.error("[telegram-remote] Polling error:", err.message)
+          log("ERROR:", "[telegram-remote] Polling error:", err.message)
         }
       })
       bot.on("error", (err) => {
-        console.error("[telegram-remote] Bot error:", err.message)
+        log("ERROR:", "[telegram-remote] Bot error:", err.message)
       })
 
       registerCommands()
@@ -355,16 +405,17 @@ export const TelegramRemotePlugin: Plugin = async ({
       registerCallbackHandler()
 
       // Start SSE event stream for real-time permission events
+      log("[telegram-remote] Starting event stream...")
       startEventStream().catch((err) => {
-        console.error("[telegram-remote] Event stream startup failed:", err)
+        log("ERROR:", "[telegram-remote] Event stream startup failed:", err)
       })
 
       // Async startup tasks (don't block)
       setupMenuAndNotify().catch((err) => {
-        console.error("[telegram-remote] Startup notification failed:", err)
+        log("ERROR:", "[telegram-remote] Startup notification failed:", err)
       })
     } catch (err) {
-      console.error("[telegram-remote] Failed to start bot:", err)
+      log("ERROR:", "[telegram-remote] Failed to start bot:", err)
     }
   }
 
@@ -387,11 +438,17 @@ export const TelegramRemotePlugin: Plugin = async ({
         `/sessions - List recent sessions\n` +
         `/switch - Switch session by ID\n` +
         `/status - Current session info\n` +
+        `/pending - Show pending permissions\n` +
         `/abort - Abort running task\n` +
         `/diff - Show file changes\n` +
         `/messages - Show recent messages\n` +
         `/shell - Run a shell command\n` +
         `/commands - List all OpenCode commands\n\n` +
+        `*Permission Responses:*\n` +
+        `When a permission is requested, reply:\n` +
+        `• *YES* or *Y* - Approve once\n` +
+        `• *ALWAYS* or *A* - Always allow this pattern\n` +
+        `• *NO* or *N* - Deny\n\n` +
         `*OpenCode Commands:*\n` +
         `/oc_undo - Undo last message\n` +
         `/oc_redo - Redo undone message\n` +
@@ -495,6 +552,21 @@ export const TelegramRemotePlugin: Plugin = async ({
       }
     })
 
+    // --- /pending ---
+    bot.onText(/\/pending/, async () => {
+      if (pendingPermissions.size === 0) {
+        await send("No pending permissions.")
+        return
+      }
+      const list = Array.from(pendingPermissions.entries())
+        .map(([msgId, p], i) => `${i + 1}. \`${escMd(p.description)}\``)
+        .join("\n")
+      await send(
+        `*Pending Permissions (${pendingPermissions.size}):*\n\n${list}\n\n` +
+        `Reply *YES* to approve once, *ALWAYS* to always allow, or *NO* to deny.`
+      )
+    })
+
     // --- /abort ---
     bot.onText(/\/abort/, async () => {
       if (!currentSessionId) {
@@ -504,6 +576,7 @@ export const TelegramRemotePlugin: Plugin = async ({
       try {
         await client.session.abort({ path: { id: currentSessionId } })
         isProcessing = false
+        awaitingPromptResult = false
         await send("Session aborted.")
       } catch (err) {
         await send(`Error: ${err}`)
@@ -680,32 +753,35 @@ export const TelegramRemotePlugin: Plugin = async ({
       const lowerText = text.toLowerCase()
 
       // --- Permission responses ---
+      function parsePermissionReply(text: string): "once" | "always" | "reject" | null {
+        if (text === "yes" || text === "y" || text === "approve") return "once"
+        if (text === "always" || text === "a" || text === "yes always") return "always"
+        if (text === "no" || text === "n" || text === "deny" || text === "reject") return "reject"
+        return null
+      }
+
       if (msg.reply_to_message) {
         const pending = pendingPermissions.get(msg.reply_to_message.message_id)
         if (pending) {
-          const approved = lowerText === "yes" || lowerText === "y" || lowerText === "approve"
-          const denied = lowerText === "no" || lowerText === "n" || lowerText === "deny"
-          if (approved || denied) {
+          const reply = parsePermissionReply(lowerText)
+          if (reply) {
             pendingPermissions.delete(msg.reply_to_message.message_id)
-            await respondToPermission(pending.sessionId, pending.permissionId, approved)
-            await send(approved ? "Approved." : "Denied.")
+            await respondToPermission(pending.sessionId, pending.permissionId, reply)
             return
           }
         }
       }
 
-      // Inline yes/no for most recent permission
-      if (
-        pendingPermissions.size > 0 &&
-        (lowerText === "yes" || lowerText === "y" || lowerText === "no" || lowerText === "n")
-      ) {
-        const entries = Array.from(pendingPermissions.entries())
-        const [msgId, pending] = entries[entries.length - 1]
-        const approved = lowerText === "yes" || lowerText === "y"
-        pendingPermissions.delete(msgId)
-        await respondToPermission(pending.sessionId, pending.permissionId, approved)
-        await send(approved ? "Approved." : "Denied.")
-        return
+      // Inline yes/no/always for most recent permission
+      if (pendingPermissions.size > 0) {
+        const reply = parsePermissionReply(lowerText)
+        if (reply) {
+          const entries = Array.from(pendingPermissions.entries())
+          const [msgId, pending] = entries[entries.length - 1]
+          pendingPermissions.delete(msgId)
+          await respondToPermission(pending.sessionId, pending.permissionId, reply)
+          return
+        }
       }
 
       // --- Inline shell (! prefix) ---
@@ -739,24 +815,23 @@ export const TelegramRemotePlugin: Plugin = async ({
 
       try {
         isProcessing = true
+        awaitingPromptResult = true
         const sessionId = await ensureSession()
+        log(`[telegram-remote] Sending async prompt to session: ${sessionId}`)
         await send("Working on it...")
 
-        const result = await client.session.prompt({
+        // Use promptAsync (fire-and-forget) so the connection is free for
+        // permission responses. The result will be picked up by the
+        // session.idle event handler via handleSessionIdle().
+        await client.session.promptAsync({
           path: { id: sessionId },
           body: { parts: [{ type: "text", text }] },
         })
-
-        const responseText = extractResponseText(result.data)
-        if (responseText) {
-          for (const chunk of splitMessage(responseText, 3500)) await send(chunk)
-        } else {
-          await send("Task completed.")
-        }
+        log(`[telegram-remote] Async prompt dispatched, waiting for session.idle`)
       } catch (err: any) {
-        await send(`Error: ${escMd(err?.message || String(err))}`)
-      } finally {
         isProcessing = false
+        awaitingPromptResult = false
+        await send(`Error: ${escMd(err?.message || String(err))}`)
       }
     })
   }
@@ -774,10 +849,12 @@ export const TelegramRemotePlugin: Plugin = async ({
 
       const data = query.data
 
-      // Handle permission approve/deny buttons (pa_ = approve, pd_ = deny)
-      if (data.startsWith("pa_") || data.startsWith("pd_")) {
-        const approved = data.startsWith("pa_")
-        const permissionId = data.slice(3) // Remove "pa_" or "pd_" prefix
+      // Handle permission buttons: pa_ = approve once, pA_ = approve always, pd_ = deny
+      if (data.startsWith("pa_") || data.startsWith("pA_") || data.startsWith("pd_")) {
+        const reply: "once" | "always" | "reject" =
+          data.startsWith("pA_") ? "always" :
+          data.startsWith("pa_") ? "once" : "reject"
+        const permissionId = data.slice(3) // Remove prefix
 
         // Find the pending permission by permissionId (match by prefix
         // since callback_data may have been truncated)
@@ -791,18 +868,23 @@ export const TelegramRemotePlugin: Plugin = async ({
           }
         }
 
+        const label =
+          reply === "once" ? "Approved (once)" :
+          reply === "always" ? "Approved (always)" :
+          "Denied"
+
         if (foundPending && foundMsgId !== undefined) {
           pendingPermissions.delete(foundMsgId)
           await respondToPermission(
             foundPending.sessionId,
             foundPending.permissionId,
-            approved,
+            reply,
           )
 
           // Update the message to show the decision
           try {
             await bot!.editMessageText(
-              `${query.message.text}\n\n${approved ? "Approved" : "Denied"}`,
+              `${query.message.text}\n\n${label}`,
               {
                 chat_id: chatId,
                 message_id: query.message.message_id,
@@ -813,9 +895,7 @@ export const TelegramRemotePlugin: Plugin = async ({
           }
 
           // Acknowledge the callback
-          await bot!.answerCallbackQuery(query.id, {
-            text: approved ? "Approved" : "Denied",
-          })
+          await bot!.answerCallbackQuery(query.id, { text: label })
         } else {
           await bot!.answerCallbackQuery(query.id, {
             text: "Permission already handled or expired.",
@@ -876,11 +956,11 @@ export const TelegramRemotePlugin: Plugin = async ({
     try {
       await bot.setMyCommands(telegramCommands.slice(0, 100))
     } catch (err) {
-      console.error("[telegram-remote] Failed to set bot commands:", err)
+      log("ERROR:", "[telegram-remote] Failed to set bot commands:", err)
     }
 
     await send(
-      `OpenCode Remote connected!\nProject: \`${escMd(directory)}\`\nCommands: ${telegramCommands.length}\n\nSend /start for help.`,
+      `OpenCode Remote connected!\nProject: \`${escMd(directory)}\`\nCommands: ${telegramCommands.length}\nDebug logs: \`${escMd(LOG_FILE)}\`\n\nSend /start for help.`,
     )
   }
 
@@ -896,17 +976,34 @@ export const TelegramRemotePlugin: Plugin = async ({
 
   return {
     event: async ({ event }: { event: any }) => {
+      log(`[telegram-remote] Event: ${event.type}`)
       const props = event.properties || {}
 
       if (event.type === "permission.asked") {
+        log("[telegram-remote] Event hook detected permission.asked event")
         // Use the centralized handler (dedup: skip if already handled via SSE)
         const permissionId =
           props.permissionID || props.permission_id || props.permissionId || props.id
+        log(`[telegram-remote] Extracted permissionId: ${permissionId}`)
         const alreadyHandled = Array.from(pendingPermissions.values()).some(
           (p) => p.permissionId === permissionId,
         )
+        log(`[telegram-remote] Already handled via SSE: ${alreadyHandled}`)
         if (!alreadyHandled) {
+          log("[telegram-remote] Calling handlePermissionAsked from event hook...")
           await handlePermissionAsked(props)
+        }
+      }
+
+      if (event.type === "session.idle") {
+        const sessionId =
+          props.sessionID || props.session_id || props.sessionId
+        if (sessionId) {
+          log(`[telegram-remote] Event hook session.idle for ${sessionId}`)
+          // Dedup: only handle if SSE hasn't already handled it
+          if (awaitingPromptResult && sessionId === currentSessionId) {
+            await handleSessionIdle(sessionId)
+          }
         }
       }
 
@@ -914,6 +1011,10 @@ export const TelegramRemotePlugin: Plugin = async ({
         const sessionId =
           props.sessionID || props.session_id || props.sessionId
         if (sessionId === currentSessionId) {
+          if (awaitingPromptResult) {
+            awaitingPromptResult = false
+            isProcessing = false
+          }
           await send(
             `*Session Error:*\n${truncate(String(props.error || "Unknown error"), 1000)}`,
           )

@@ -11,7 +11,7 @@ Add to your `opencode.json`:
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["opencode-telegram-plugin"]
+  "plugin": ["opencode-telegram-plugin"]
 }
 ```
 

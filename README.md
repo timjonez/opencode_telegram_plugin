@@ -77,7 +77,7 @@ The plugin loads at startup. You'll receive a "Connected!" message in Telegram w
 - **All OpenCode commands** -- every built-in and custom slash command is available as `/oc_<name>`
 - **Shell commands** -- run shell commands with `/shell` or the `!` prefix
 - **Session management** -- create, list, switch, and abort sessions
-- **Permission forwarding** -- tool permission requests are forwarded to Telegram; reply `yes`/`no` to approve or deny. Auto-denies after 5 minutes
+- **Permission forwarding** -- tool permission requests are forwarded to Telegram with yes/always/no options; reply with YES, ALWAYS, or NO to respond. Auto-denies after 5 minutes
 - **File diff view** -- see what files were changed in the current session
 - **Auto-discovery** -- custom commands defined in `.opencode/commands/` or `opencode.json` are automatically registered in the Telegram bot menu at startup
 - **Long message handling** -- responses are split to fit Telegram's 4096 character limit
@@ -133,11 +133,16 @@ Custom commands can accept arguments:
 
 ## Permissions
 
-When OpenCode needs to execute a tool that requires permission (file edits, bash commands, etc.), the request is forwarded to Telegram with details about the tool and arguments. You can:
+When OpenCode needs permission to execute a tool (file edits, bash commands, etc.), the request is forwarded to Telegram with details about the tool. You can respond by:
 
-- **Reply** to the permission message with `yes` or `no`
-- **Send** `yes` or `no` without replying (applies to the most recent pending request)
-- **Do nothing** -- requests auto-deny after 5 minutes
+- **Replying** to the permission message with:
+  - `YES` or `Y` - Approve once
+  - `ALWAYS` or `A` - Always allow this pattern
+  - `NO` or `N` - Deny
+- **Sending** `YES`, `ALWAYS`, or `NO` without replying (applies to most recent pending request)
+- **Doing nothing** - Requests auto-deny after 5 minutes
+
+Use `/pending` to see any pending permission requests.
 
 ## Environment variables
 

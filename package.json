@@ -1,0 +1,59 @@
+{
+  "name": "opencode-telegram-remote",
+  "version": "1.0.0",
+  "description": "Control OpenCode from your phone via Telegram. Send prompts, manage sessions, run shell commands, approve permissions, and execute any OpenCode slash command.",
+  "type": "module",
+  "main": "./dist/telegram-remote.js",
+  "types": "./dist/telegram-remote.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/telegram-remote.js",
+      "types": "./dist/telegram-remote.d.ts"
+    }
+  },
+  "files": [
+    "dist/**/*",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "bun build ./telegram-remote.ts --outdir ./dist --target node",
+    "build:types": "tsc --emitDeclarationOnly --outDir ./dist",
+    "build:all": "bun run build && bun run build:types",
+    "prepublishOnly": "bun run build:all",
+    "dev": "bun build ./telegram-remote.ts --outdir ./dist --target node --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "telegram",
+    "remote-control",
+    "ai",
+    "cli"
+  ],
+  "author": "",
+  "license": "MIT",
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=0.1.0"
+  },
+  "dependencies": {
+    "node-telegram-bot-api": "^0.66.0"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": ">=0.1.0",
+    "@types/node-telegram-bot-api": "^0.64.0",
+    "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anomalyco/opencode-telegram-remote.git"
+  },
+  "bugs": {
+    "url": "https://github.com/anomalyco/opencode-telegram-remote/issues"
+  },
+  "homepage": "https://github.com/anomalyco/opencode-telegram-remote#readme"
+}

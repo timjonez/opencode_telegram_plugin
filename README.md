@@ -2,17 +2,44 @@
 
 Control [OpenCode](https://opencode.ai) from your phone via Telegram. Send prompts, manage sessions, run shell commands, approve permissions, and execute any OpenCode slash command -- all from a Telegram chat.
 
-## Features
+## Installation
 
-- **Chat with OpenCode** -- send any message as a prompt and get the full response back
-- **All OpenCode commands** -- every built-in and custom slash command is available as `/oc_<name>`
-- **Shell commands** -- run shell commands with `/shell` or the `!` prefix
-- **Session management** -- create, list, switch, and abort sessions
-- **Permission forwarding** -- tool permission requests are forwarded to Telegram; reply `yes`/`no` to approve or deny. Auto-denies after 5 minutes
-- **File diff view** -- see what files were changed in the current session
-- **Auto-discovery** -- custom commands defined in `.opencode/commands/` or `opencode.json` are automatically registered in the Telegram bot menu at startup
-- **Long message handling** -- responses are split to fit Telegram's 4096 character limit
-- **Error notifications** -- session errors are forwarded to Telegram
+### From npm (recommended)
+
+Add to your `opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["opencode-telegram-remote"]
+}
+```
+
+Or install globally in `~/.config/opencode/opencode.json`.
+
+OpenCode will automatically install the plugin using Bun.
+
+### Manual install
+
+Copy `telegram-remote.ts` to your plugins directory:
+
+```bash
+# Global
+cp telegram-remote.ts ~/.config/opencode/plugins/
+
+# Project-specific
+cp telegram-remote.ts .opencode/plugins/
+```
+
+Then add the dependency to your `package.json`:
+
+```json
+{
+  "dependencies": {
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
+```
 
 ## Setup
 
@@ -40,41 +67,21 @@ export TELEGRAM_BOT_TOKEN="your-bot-token"
 export TELEGRAM_CHAT_ID="your-chat-id"
 ```
 
-### 4. Install the plugin
-
-**Global install** (works across all projects):
-
-```bash
-# Copy the plugin file
-cp telegram-remote.ts ~/.config/opencode/plugins/
-
-# Add the dependency
-cd ~/.config/opencode
-# Add "node-telegram-bot-api": "^0.66.0" to package.json dependencies
-npm install
-```
-
-Or add `node-telegram-bot-api` to your existing `~/.config/opencode/package.json`:
-
-```json
-{
-  "dependencies": {
-    "node-telegram-bot-api": "^0.66.0"
-  }
-}
-```
-
-**Per-project install:**
-
-```bash
-cp telegram-remote.ts .opencode/plugins/
-```
-
-And add the dependency to `.opencode/package.json`.
-
-### 5. Restart OpenCode
+### 4. Restart OpenCode
 
 The plugin loads at startup. You'll receive a "Connected!" message in Telegram when it's ready.
+
+## Features
+
+- **Chat with OpenCode** -- send any message as a prompt and get the full response back
+- **All OpenCode commands** -- every built-in and custom slash command is available as `/oc_<name>`
+- **Shell commands** -- run shell commands with `/shell` or the `!` prefix
+- **Session management** -- create, list, switch, and abort sessions
+- **Permission forwarding** -- tool permission requests are forwarded to Telegram; reply `yes`/`no` to approve or deny. Auto-denies after 5 minutes
+- **File diff view** -- see what files were changed in the current session
+- **Auto-discovery** -- custom commands defined in `.opencode/commands/` or `opencode.json` are automatically registered in the Telegram bot menu at startup
+- **Long message handling** -- responses are split to fit Telegram's 4096 character limit
+- **Error notifications** -- session errors are forwarded to Telegram
 
 ## Commands
 
@@ -132,18 +139,6 @@ When OpenCode needs to execute a tool that requires permission (file edits, bash
 - **Send** `yes` or `no` without replying (applies to the most recent pending request)
 - **Do nothing** -- requests auto-deny after 5 minutes
 
-## How it works
-
-The plugin uses the [OpenCode SDK](https://opencode.ai/docs/sdk) to interact with the OpenCode server. It starts a Telegram bot using long polling on a deferred tick so it doesn't block OpenCode startup. At startup it:
-
-1. Clears any stale polling connections (`deleteWebhook`)
-2. Starts the Telegram bot with error recovery
-3. Fetches all available OpenCode commands from the server
-4. Registers them in the Telegram bot menu
-5. Sends a connection notification
-
-Messages you send are forwarded to OpenCode via `session.prompt()`. Slash commands go through `session.command()`. Shell commands use `session.shell()`. Permission responses are sent via the permissions API.
-
 ## Environment variables
 
 | Variable | Required | Description |
@@ -158,7 +153,6 @@ If either variable is missing, the plugin logs a warning and disables itself.
 - [OpenCode](https://opencode.ai) v0.1+
 - Node.js 18+
 - `node-telegram-bot-api` npm package
-- `@opencode-ai/plugin` (for TypeScript types)
 
 ## License
 

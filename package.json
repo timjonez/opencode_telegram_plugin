@@ -1,6 +1,6 @@
 {
-  "name": "opencode-telegram-remote",
-  "version": "1.0.0",
+  "name": "opencode-telegram-plugin",
+  "version": "0.1.0",
   "description": "Control OpenCode from your phone via Telegram. Send prompts, manage sessions, run shell commands, approve permissions, and execute any OpenCode slash command.",
   "type": "module",
   "main": "./dist/telegram-remote.js",
@@ -32,7 +32,7 @@
     "ai",
     "cli"
   ],
-  "author": "",
+  "author": "Tim Jones <timjonez@protonmail.com>[](https://github.com/timjonez)",
   "license": "MIT",
   "peerDependencies": {
     "@opencode-ai/plugin": ">=0.1.0"
@@ -50,10 +50,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/anomalyco/opencode-telegram-remote.git"
+    "url": "git+https://github.com/timjonez/opencode_telegram_bot.git"
   },
   "bugs": {
-    "url": "https://github.com/anomalyco/opencode-telegram-remote/issues"
+    "url": "https://github.com/timjonez/opencode_telegram_bot/issues"
   },
-  "homepage": "https://github.com/anomalyco/opencode-telegram-remote#readme"
+  "homepage": "https://github.com/timjonez/opencode_telegram_bot#readme"
 }
